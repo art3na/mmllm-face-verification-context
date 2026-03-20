@@ -5,7 +5,7 @@ This repository contains the reproduction code for the paper:
 **Multimodal Large Language Models for Face Verification: The Impact of Adversarial and Cooperative Context**
 *Arturas Nakvosas*
 Institute of Data Science and Digital Technologies, Vilnius University
-Corresponding author: arturas.nakvosas@mif.vu.lt
+Corresponding author: arturas.nakvosas@mif.stud.vu.lt
 
 ## Overview
 
