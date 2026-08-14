@@ -5,7 +5,7 @@ This repository contains the reproduction code for the paper:
 **Multimodal Large Language Models for Face Verification: The Impact of Adversarial and Cooperative Context**
 *Arturas Nakvosas*
 Institute of Data Science and Digital Technologies, Vilnius University
-Corresponding author: arturas.nakvosas@mif.stud.vu.lt
+Corresponding author: arturas.nakvosas@mif.vu.lt
 
 ## Overview
 
@@ -95,8 +95,36 @@ Arguments:
 - `--model`: Model name to query.
 - `--datasets`: List of datasets to evaluate (default: `age_db_30`, `calfw`, `cplfw`).
 - `--max_workers`: Number of parallel requests.
+- `--context_format`: `text` (default) runs the full natural-language context ensemble (`TEXT_PAIRS`); `json` runs the structured-context probe (see below).
 
 Results will be saved in `results/<dataset>/<model>/`.
+
+### Structured-context (JSON) probe
+
+To test whether contextual sensitivity persists when the context is delivered as
+structured metadata instead of a natural-language statement, run the JSON probe:
+
+```bash
+python run_experiments.py \
+  --base_url "http://localhost:8000/v1" \
+  --model "qwen3-vl-8b" \
+  --datasets lfw \
+  --context_format json
+```
+
+The context channel then carries a single machine-style JSON record with a boolean
+claim and no natural-language surface:
+
+```json
+{"task": "face_verification", "same_person": true}
+```
+
+with `same_person` set consistently with the ground truth in Assist mode and
+flipped in Attack mode. All 15 prompts are used, so results are comparable to the
+natural-language ensemble. The Base (no-context) condition is skipped because it
+is identical to the Base runs of `--context_format text` — run the text ensemble
+first (or at least its base condition) on the same dataset/model. Result files are
+named `<model>_P<p>_J0_logprobs_{attack,assist}.csv` alongside the `_T*` files.
 
 ### 2. Plot Results
 
@@ -115,15 +143,18 @@ Arguments:
 - `--plots_dir`: Directory to save generated plots (default: `plots`).
 - `--datasets`: Datasets to process.
 - `--models`: List of models to include in comparison plots.
+- `--context_format`: `text` (default) analyzes the natural-language ensemble (`_T*` files); `json` analyzes the structured-context probe (`_J*` files, reusing Base runs from the `_T*` files). All JSON-mode outputs (metrics CSVs, plots, significance rows) carry a `_json` suffix so they never overwrite the text-ensemble outputs.
+
+Example for the JSON probe:
+
+```bash
+python plot_aggregated_det_from_csv_with_metrics.py \
+  --results_dir "results" \
+  --datasets lfw \
+  --models qwen3-vl-8b \
+  --context_format json
+```
 
 ## License
 
-The MIT License (MIT)
-
-Copyright (c) 2026 Aruras Nakvosas
-
-Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+[License Information]

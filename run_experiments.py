@@ -188,7 +188,9 @@ def call_llm(client: OpenAI, prompt, text_pair, x1: bytes, x2: bytes, label, idx
     )
 
     choice = chat_completion.choices[0].logprobs
-    content = choice.content[0].token or ""
+    # Full completion text (not just the first token) so off-script responses
+    # are diagnosable from the saved CSVs; falls back to the first token.
+    content = chat_completion.choices[0].message.content or choice.content[0].token or ""
     
     lp_yes, lp_no = yes_no_logprobs_from_choice(choice.content[0].top_logprobs)
     return content, lp_yes, lp_no
@@ -290,19 +292,18 @@ def perfom_test(Images_1, Images_2, y_true, mode, max_workers, client, prompt, t
         pd.DataFrame(rows).to_csv(save_csv, index=False)
         print(f"Saved per-pair logprobs/probs to: {save_csv}")
     
-    if valid_idx:
-        return yv, pv
-    else:
-        return None, None
+    return y_true, y_pred
 
 
 def test_face_recognition_model(Images_1, Images_2, y_true, client, model_name: str, max_workers=128,
-                                save_csv_prefix: str = None, prompt: str=None, text_pair:str = None):
+                                save_csv_prefix: str = None, prompt: str=None, text_pair:str = None,
+                                skip_base: bool = False):
 
-    y_base, p_base = perfom_test(
-        Images_1, Images_2, y_true, 0, max_workers, client, prompt, text_pair, model_name,
-        save_csv=(f"{save_csv_prefix}_base.csv" if save_csv_prefix else None)
-    )
+    if not skip_base:
+        y_base, p_base = perfom_test(
+            Images_1, Images_2, y_true, 0, max_workers, client, prompt, text_pair, model_name,
+            save_csv=(f"{save_csv_prefix}_base.csv" if save_csv_prefix else None)
+        )
     y_attack, p_attack = perfom_test(
         Images_1, Images_2, y_true, 1, max_workers, client, prompt, text_pair, model_name,
         save_csv=(f"{save_csv_prefix}_attack.csv" if save_csv_prefix else None)
@@ -428,6 +429,15 @@ TEXT_PAIRS = [
     ("these two faces are identical (same person)", "these two faces are not identical (different people)")
 ]
 
+# Structured-context (JSON) probe. Same (same-person, not-same-person) convention
+# as TEXT_PAIRS, so call_llm's attack/assist mode logic applies unchanged. The
+# claim is a bare boolean flag: no natural-language surface, only the payload
+# field differs between the two elements.
+JSON_TEXT_PAIRS = [
+    ('{"task": "face_verification", "same_person": true}',
+     '{"task": "face_verification", "same_person": false}'),
+]
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Run MMLLM Face Verification Experiments")
     parser.add_argument("--api_key", type=str, default=os.getenv("OPENAI_API_KEY"), help="OpenAI API Key (or set OPENAI_API_KEY env var)")
@@ -437,6 +447,10 @@ def parse_args():
     parser.add_argument("--lfw_dir", type=str, default="dtb/lfw", help="Path to LFW dataset directory (if using LFW)")
     parser.add_argument("--results_dir", type=str, default="results", help="Directory to save results")
     parser.add_argument("--max_workers", type=int, default=128, help="Max workers for parallel requests")
+    parser.add_argument("--context_format", type=str, default="text", choices=["text", "json"],
+                        help="Context channel format: 'text' runs the full natural-language TEXT_PAIRS ensemble; "
+                             "'json' runs the structured-context probe (JSON_TEXT_PAIRS). In 'json' mode the base "
+                             "(no-context) condition is skipped, since it is identical to the base runs of 'text' mode.")
     return parser.parse_args()
 
 if __name__ == "__main__":
@@ -475,11 +489,15 @@ if __name__ == "__main__":
         result_path = os.path.join(args.results_dir, db_config[2], args.model)
         os.makedirs(result_path, exist_ok=True)
         
+        use_json = args.context_format == "json"
+        context_pairs = JSON_TEXT_PAIRS if use_json else TEXT_PAIRS
+        ctx_prefix = "J" if use_json else "T"
+
         for p_idx, prompt in enumerate(PROMPTS):
-            for t_idx, text_pair in enumerate(TEXT_PAIRS):
-                save_prefix = os.path.join(result_path, f"{args.model}_P{p_idx}_T{t_idx}_logprobs")
-                
-                print(f"  Running Prompt {p_idx}, Text Pair {t_idx}...")
+            for t_idx, text_pair in enumerate(context_pairs):
+                save_prefix = os.path.join(result_path, f"{args.model}_P{p_idx}_{ctx_prefix}{t_idx}_logprobs")
+
+                print(f"  Running Prompt {p_idx}, Context Pair {ctx_prefix}{t_idx}...")
                 test_face_recognition_model(
                     Images_1,
                     Images_2,
@@ -489,6 +507,7 @@ if __name__ == "__main__":
                     save_csv_prefix=save_prefix,
                     prompt=prompt,
                     text_pair=text_pair,
-                    model_name=args.model
+                    model_name=args.model,
+                    skip_base=use_json
                 )
 

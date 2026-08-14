@@ -140,7 +140,7 @@ ALL_METRICS_CSV_TEMPLATE = "all_models_metrics_{dataset}.csv"
 # Data loading
 # =========================
 
-def load_runs_from_csv(model_name: str, base_results_root: str):
+def load_runs_from_csv(model_name: str, base_results_root: str, context_tag: str = "T"):
     """
     Scan all CSVs for a given model and group them by mode.
 
@@ -158,14 +158,14 @@ def load_runs_from_csv(model_name: str, base_results_root: str):
     """
     results_dir = os.path.join(base_results_root, model_name)
 
-    csv_glob_pattern = os.path.join(
-        results_dir,
-        f"{model_name}_P*_T*_logprobs_*.csv"
-    )
-
-    filename_re = re.compile(
-        r".*_P(\d+)_T(\d+)_logprobs_(base|attack|assist)\.csv$"
-    )
+    # Each spec: (context tag in filename, modes to load from those files).
+    # JSON runs skip the base condition (it is identical to the text-mode base,
+    # no context is injected), so in 'J' mode base runs are reused from the
+    # natural-language ('T') result files.
+    if context_tag == "J":
+        scan_specs = [("J", ("attack", "assist")), ("T", ("base",))]
+    else:
+        scan_specs = [(context_tag, ("base", "attack", "assist"))]
 
     all_runs = {
         "base":   [],
@@ -179,17 +179,26 @@ def load_runs_from_csv(model_name: str, base_results_root: str):
         "assist": [],
     }
 
-    csv_files = sorted(glob.glob(csv_glob_pattern))
+    csv_files = []  # list of (path, tag, allowed_modes)
+    for tag, allowed_modes in scan_specs:
+        pattern = os.path.join(results_dir, f"{model_name}_P*_{tag}*_logprobs_*.csv")
+        found = sorted(glob.glob(pattern))
+        if not found:
+            print(f"[{model_name}] No CSV files found for pattern: {pattern}")
+        csv_files.extend((path, tag, allowed_modes) for path in found)
+
     if not csv_files:
-        print(f"[{model_name}] No CSV files found for pattern: {csv_glob_pattern}")
         return all_runs, metric_data
 
     print(f"[{model_name}] Found {len(csv_files)} CSV files:")
-    for path in csv_files:
+    for path, _, _ in csv_files:
         print("  ", path)
 
-    for path in csv_files:
+    for path, tag, allowed_modes in csv_files:
         fname = os.path.basename(path)
+        filename_re = re.compile(
+            rf".*_P(\d+)_{tag}(\d+)_logprobs_(base|attack|assist)\.csv$"
+        )
         m = filename_re.match(fname)
         if not m:
             print(f"[{model_name}] Skipping {fname}: filename does not match expected pattern.")
@@ -199,9 +208,12 @@ def load_runs_from_csv(model_name: str, base_results_root: str):
         text_idx = int(m.group(2))
         mode = m.group(3)  # 'base', 'attack', or 'assist'
 
+        if mode not in allowed_modes:
+            continue
+
         if mode == 'base' and text_idx > 0:
             print(f"[{model_name}] Skipping {fname}: filename base text idx is greater than 0")
-            continue 
+            continue
 
 
         df = pd.read_csv(path)
@@ -1082,7 +1094,7 @@ def flatten_metrics_for_csv(model_name, metrics_all_modes):
 # Global Prompt Analysis
 # =========================
 
-def analyze_global_prompt_performance(all_metric_data_global):
+def analyze_global_prompt_performance(all_metric_data_global, out_suffix=""):
     """
     Aggregates data across ALL datasets and models per prompt index.
     Ranks prompts by Accuracy.
@@ -1153,7 +1165,7 @@ def analyze_global_prompt_performance(all_metric_data_global):
             
         # Save to CSV
         df = pd.DataFrame(prompt_metrics)
-        df_csv_path = f"global_prompt_performance_analysis.csv"
+        df_csv_path = f"global_prompt_performance_analysis{out_suffix}.csv"
         df.to_csv(df_csv_path, index=False)
         print(f"\nSaved global prompt analysis to: {df_csv_path}")
 
@@ -1227,7 +1239,7 @@ def aggregate_across_datasets_old(dataset_metrics_store):
         print(acc_df.pivot(index="model", columns="mode", values="mean_across_datasets"))
 
 
-def aggregate_across_datasets(dataset_metrics_store, levels=("macro_prompts", "macro_text"), conf=0.95):
+def aggregate_across_datasets(dataset_metrics_store, levels=("macro_prompts", "macro_text"), conf=0.95, out_suffix=""):
     """
     Aggregates metrics across datasets, using DATASET as the statistical unit (n = #datasets).
 
@@ -1288,7 +1300,7 @@ def aggregate_across_datasets(dataset_metrics_store, levels=("macro_prompts", "m
         return
 
     df = pd.DataFrame(rows)
-    out_path = "all_models_metrics_aggregated_across_datasets_macro_prompts_and_macro_text.csv"
+    out_path = f"all_models_metrics_aggregated_across_datasets_macro_prompts_and_macro_text{out_suffix}.csv"
     df.to_csv(out_path, index=False)
     print(f"Saved aggregated metrics across datasets to: {out_path}")
 
@@ -1460,6 +1472,10 @@ def parse_args():
     parser.add_argument("--datasets", nargs="+", default=["lfw", "age_db_30", "calfw", "cplfw"], help="Datasets to process")
     parser.add_argument("--models", nargs="+", default=DEFAULT_MODEL_NAME_LS, help="List of models to include")
     parser.add_argument("--plots_dir", type=str, default="plots", help="Directory to save plots")
+    parser.add_argument("--context_format", type=str, default="text", choices=["text", "json"],
+                        help="Which context-channel results to analyze: 'text' loads the natural-language "
+                             "ensemble (_T* files), 'json' loads the structured-context probe (_J* files, "
+                             "with base runs reused from the _T* files). Outputs get a '_json' suffix.")
     return parser.parse_args()
 
 if __name__ == "__main__":
@@ -1483,7 +1499,10 @@ if __name__ == "__main__":
         print("#" * 80)
 
         base_results_root = os.path.join(args.results_dir, dataset)
-        all_metrics_csv = ALL_METRICS_CSV_TEMPLATE.format(dataset=dataset)
+        # Label used for all outputs (metrics CSV, plots, significance rows) so
+        # JSON-probe results never overwrite the text-ensemble results.
+        dataset_label = f"{dataset}_json" if args.context_format == "json" else dataset
+        all_metrics_csv = ALL_METRICS_CSV_TEMPLATE.format(dataset=dataset_label)
         
         all_rows = []
         all_models_runs = {}
@@ -1499,7 +1518,8 @@ if __name__ == "__main__":
             print(f"Processing model: {m} (Dataset: {dataset})")
             print("=" * 40)
 
-            runs_m, metric_data_m = load_runs_from_csv(m, base_results_root)
+            context_tag = "J" if args.context_format == "json" else "T"
+            runs_m, metric_data_m = load_runs_from_csv(m, base_results_root, context_tag=context_tag)
             all_models_runs[m] = runs_m
 
             # Accumulate for global analysis
@@ -1513,7 +1533,7 @@ if __name__ == "__main__":
             metrics_m = compute_all_metrics(metric_data_m)
 
             sig_out = "significance_tests_per_model.csv"
-            rows = unpaired_tests_per_model(metric_data_m, m, dataset, out_csv_path=sig_out)
+            rows = unpaired_tests_per_model(metric_data_m, m, dataset_label, out_csv_path=sig_out)
 
             for r in rows:
                 print(
@@ -1522,14 +1542,14 @@ if __name__ == "__main__":
                 )
             
             # Store for cross-dataset aggregation
-            dataset_metrics_store[m][dataset] = metrics_m
+            dataset_metrics_store[m][dataset_label] = metrics_m
             
             rows_m = flatten_metrics_for_csv(m, metrics_m)
             all_rows.extend(rows_m)
 
             # For the "single detailed" model, also make a per-model DET with bands
             # Use each model as "single detailed" in loop
-            single_det_png = SINGLE_MODEL_DET_PNG.format(model=m, dataset=dataset)
+            single_det_png = SINGLE_MODEL_DET_PNG.format(model=m, dataset=dataset_label)
             _ = plot_aggregated_det(runs_m, m, save_path=os.path.join(args.plots_dir, single_det_png), log_axes=True)
 
         # ---- Save all metrics to CSV ----
@@ -1551,13 +1571,14 @@ if __name__ == "__main__":
         
         # NOTE: plot_det_all_models writes to hardcoded "plots/..."
         # I will update the function signature later or assuming "plots" is fine.
-        plot_det_all_models(all_models_runs, dataset, save_dir=args.plots_dir, log_axes=True)
+        plot_det_all_models(all_models_runs, dataset_label, save_dir=args.plots_dir, log_axes=True)
 
     # ---- Global Prompt Analysis ----
-    analyze_global_prompt_performance(global_metric_data)
-    
+    out_suffix = "_json" if args.context_format == "json" else ""
+    analyze_global_prompt_performance(global_metric_data, out_suffix=out_suffix)
+
     # ---- Global Aggregation Across Datasets ----
-    aggregate_across_datasets(dataset_metrics_store)
+    aggregate_across_datasets(dataset_metrics_store, out_suffix=out_suffix)
 
     
 
