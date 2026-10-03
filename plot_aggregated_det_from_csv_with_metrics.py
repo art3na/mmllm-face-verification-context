@@ -1448,6 +1448,25 @@ def unpaired_tests_per_model(metric_data_m, model_name, dataset_name, out_csv_pa
     if r1: rows.append(r1)
     if r2: rows.append(r2)
 
+    # Holm-Bonferroni correction. The family is the set of primary comparisons
+    # made for this (model, dataset) cell: Base-vs-Attack and Base-vs-Assist
+    # (m = 2). Significance markers in the paper (Table 6) use p_holm.
+    def holm(pvals):
+        m = len(pvals)
+        order = sorted(range(m), key=lambda i: pvals[i])
+        adj = [0.0] * m
+        running = 0.0
+        for rank, i in enumerate(order):
+            running = max(running, (m - rank) * pvals[i])
+            adj[i] = min(1.0, running)
+        return adj
+
+    p_adj = holm([r["p_wilcoxon"] for r in rows])
+    for r, pa in zip(rows, p_adj):
+        r["p_holm"] = float(pa)
+        r["stars_holm"] = "***" if pa < 0.001 else "**" if pa < 0.01 else "*" if pa < 0.05 else ""
+        r["significant_1p"] = bool(pa < 0.01)
+
     # optional CSV append
     if out_csv_path and rows:
         import pandas as pd
@@ -1538,7 +1557,7 @@ if __name__ == "__main__":
             for r in rows:
                 print(
                     f"[SIGTEST] {r['dataset']} | {r['model']} | {r['comparison']} "
-                    f"p_wilcoxon={r['p_wilcoxon']:.3e}"
+                    f"p_wilcoxon={r['p_wilcoxon']:.3e} p_holm={r['p_holm']:.3e} {r['stars_holm']}"
                 )
             
             # Store for cross-dataset aggregation
